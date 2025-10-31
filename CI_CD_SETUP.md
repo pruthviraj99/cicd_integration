@@ -152,6 +152,7 @@ bundle exec fastlane increment_version type:major
 2. **Google Play API errors**: Verify service account permissions and JSON key
 3. **Version conflicts**: Ensure version codes are incremental
 4. **Build failures**: Check Flutter and Android SDK versions
+5. **Dart SDK version mismatch**: CI/CD uses Flutter 3.35.7 (Dart SDK 3.9.2+) to match pubspec.yaml requirements
 
 ### Debug Commands:
 
@@ -162,6 +163,9 @@ bundle exec fastlane test
 
 # Validate Google Play API
 bundle exec fastlane run validate_play_store_json_key
+
+# Check Flutter/Dart version compatibility
+./check_flutter_version.sh
 
 # Check version info
 flutter --version

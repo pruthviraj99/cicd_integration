@@ -12,3 +12,5 @@ GeneratedPluginRegistrant.java
 #key.properties
 #**/*.keystore
 #**/*.jks
+
+playstore-app-distribution-key.json
