@@ -1,0 +1,415 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ develop, main, release ]
+  pull_request:
+    branches: [ develop, main, release ]
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version increment type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+        - patch
+        - minor
+        - major
+      deployment_track:
+        description: 'Deployment track'
+        required: true
+        default: 'internal'
+        type: choice
+        options:
+        - internal
+        - beta
+        - production
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'zulu'
+        java-version: '17'
+    
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24.0'
+        channel: 'stable'
+    
+    - name: Get dependencies
+      run: flutter pub get
+    
+    - name: Analyze code
+      run: flutter analyze
+    
+    - name: Run tests
+      run: flutter test
+
+  build-and-deploy-internal:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+    
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'zulu'
+        java-version: '17'
+    
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24.0'
+        channel: 'stable'
+    
+    - name: Setup Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.0'
+        bundler-cache: true
+        working-directory: android
+    
+    - name: Get Flutter dependencies
+      run: flutter pub get
+    
+    - name: Setup Android signing
+      run: |
+        echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 --decode > android/app/keystore.jks
+        echo "storeFile=keystore.jks" >> android/key.properties
+        echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" >> android/key.properties
+        echo "storePassword=${{ secrets.ANDROID_STORE_PASSWORD }}" >> android/key.properties
+        echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}" >> android/key.properties
+    
+    - name: Setup Google Play API key
+      run: |
+        echo "${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}" > android/fastlane/google-play-api-key.json
+    
+    - name: Update Fastlane Appfile with API key path
+      run: |
+        sed -i 's|json_key_file("")|json_key_file("google-play-api-key.json")|' android/fastlane/Appfile
+    
+    - name: Configure git
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+    
+    - name: Increment patch version (develop branch)
+      run: |
+        cd android
+        bundle exec fastlane increment_version type:patch
+    
+    - name: Commit version changes
+      run: |
+        git add .
+        git diff --staged --quiet || git commit -m "chore: bump version [skip ci]"
+        git push origin develop
+    
+    - name: Build release artifacts (APK + AAB)
+      run: |
+        cd android
+        bundle exec fastlane build_all_release
+    
+    - name: Upload Debug APK artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: develop-apk-${{ github.sha }}
+        path: android/app/build/outputs/flutter-apk/app-release.apk
+        retention-days: 15
+    
+    - name: Upload AAB artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: develop-aab-${{ github.sha }}
+        path: android/app/build/outputs/bundle/release/app-release.aab
+        retention-days: 15
+    
+    - name: Deploy to internal testing
+      run: |
+        cd android
+        bundle exec fastlane internal
+      env:
+        SUPPLY_JSON_KEY_DATA: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+    
+    - name: Create Develop Summary
+      run: |
+        echo "## 🔄 Develop Build Completed" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📱 Build Information" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch**: develop" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Version**: $(grep 'versionName' android/app/build.gradle.kts | cut -d'"' -f2)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Build Number**: $(grep 'versionCode' android/app/build.gradle.kts | grep -o '[0-9]*')" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 Artifacts Generated" >> $GITHUB_STEP_SUMMARY
+        echo "- Develop APK: \`develop-apk-${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Develop AAB: \`develop-aab-${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🎯 Deployment Status" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Successfully deployed to Google Play Console (Internal testing track)**" >> $GITHUB_STEP_SUMMARY
+
+  build-and-deploy-release:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/release' && github.event_name == 'push'
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+    
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'zulu'
+        java-version: '17'
+    
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24.0'
+        channel: 'stable'
+    
+    - name: Setup Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.0'
+        bundler-cache: true
+        working-directory: android
+    
+    - name: Get Flutter dependencies
+      run: flutter pub get
+    
+    - name: Setup Android signing
+      run: |
+        echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 --decode > android/keystore/cicdintegration.jks
+        echo "storeFile=keystore/cicdintegration.jks" > android/key.properties
+        echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" >> android/key.properties
+        echo "storePassword=${{ secrets.ANDROID_STORE_PASSWORD }}" >> android/key.properties
+        echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}" >> android/key.properties
+    
+    - name: Setup Google Play API key
+      run: |
+        echo "${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}" > android/fastlane/google-play-api-key.json
+    
+    - name: Update Fastlane Appfile with API key path
+      run: |
+        sed -i 's|json_key_file("")|json_key_file("google-play-api-key.json")|' android/fastlane/Appfile
+    
+    - name: Configure git
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+    
+    - name: Increment minor version (release branch)
+      run: |
+        cd android
+        bundle exec fastlane increment_version type:minor
+    
+    - name: Commit version changes
+      run: |
+        git add .
+        git diff --staged --quiet || git commit -m "chore: release version bump [skip ci]"
+        git push origin release
+    
+    - name: Build release artifacts (APK + AAB)
+      run: |
+        cd android
+        bundle exec fastlane build_all_release
+    
+    - name: Upload Release APK artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-apk-${{ github.sha }}
+        path: android/app/build/outputs/flutter-apk/app-release.apk
+        retention-days: 30
+    
+    - name: Upload Release AAB artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-aab-${{ github.sha }}
+        path: android/app/build/outputs/bundle/release/app-release.aab
+        retention-days: 30
+    
+    - name: Deploy to Play Store Production
+      run: |
+        cd android
+        bundle exec fastlane production
+      env:
+        SUPPLY_JSON_KEY_DATA: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+    
+    - name: Create Release Summary
+      run: |
+        echo "## 🚀 Release Deployment Completed" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📱 Build Information" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch**: release" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Version**: $(grep 'versionName' android/app/build.gradle.kts | cut -d'"' -f2)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Build Number**: $(grep 'versionCode' android/app/build.gradle.kts | grep -o '[0-9]*')" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 Artifacts Generated" >> $GITHUB_STEP_SUMMARY
+        echo "- Release APK: \`release-apk-${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Release AAB: \`release-aab-${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🎯 Deployment Status" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Successfully deployed to Google Play Console (Production track)**" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📥 Download Artifacts" >> $GITHUB_STEP_SUMMARY
+        echo "You can download the build artifacts from this workflow run for testing or backup purposes." >> $GITHUB_STEP_SUMMARY
+
+  manual-deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+    
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'zulu'
+        java-version: '17'
+    
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24.0'
+        channel: 'stable'
+    
+    - name: Setup Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.0'
+        bundler-cache: true
+        working-directory: android
+    
+    - name: Get Flutter dependencies
+      run: flutter pub get
+    
+    - name: Setup Android signing
+      run: |
+        echo "${{ secrets.ANDROID_KEYSTORE }}" | base64 --decode > android/keystore/cicdintegration.jks
+        echo "storeFile=keystore/cicdintegration.jks" > android/key.properties
+        echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" >> android/key.properties
+        echo "storePassword=${{ secrets.ANDROID_STORE_PASSWORD }}" >> android/key.properties
+        echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}" >> android/key.properties
+    
+    - name: Setup Google Play API key
+      run: |
+        echo "${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}" > android/fastlane/google-play-api-key.json
+    
+    - name: Update Fastlane Appfile with API key path
+      run: |
+        sed -i 's|json_key_file("")|json_key_file("google-play-api-key.json")|' android/fastlane/Appfile
+    
+    - name: Configure git
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+    
+    - name: Increment version (manual trigger)
+      run: |
+        cd android
+        bundle exec fastlane increment_version type:${{ github.event.inputs.version_type }}
+    
+    - name: Commit version changes
+      run: |
+        git add .
+        git diff --staged --quiet || git commit -m "chore: manual version bump [skip ci]"
+        git push origin ${{ github.ref_name }}
+    
+    - name: Build release artifacts (APK + AAB)
+      run: |
+        cd android
+        bundle exec fastlane build_all_release
+    
+    - name: Upload Manual APK artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: manual-apk-${{ github.event.inputs.version_type }}-${{ github.sha }}
+        path: android/app/build/outputs/flutter-apk/app-release.apk
+        retention-days: 30
+    
+    - name: Upload Manual AAB artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: manual-aab-${{ github.event.inputs.version_type }}-${{ github.sha }}
+        path: android/app/build/outputs/bundle/release/app-release.aab
+        retention-days: 30
+    
+    - name: Deploy to Play Store
+      run: |
+        cd android
+        bundle exec fastlane ${{ github.event.inputs.deployment_track }}
+      env:
+        SUPPLY_JSON_KEY_DATA: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+    
+    - name: Create Manual Deploy Summary
+      run: |
+        echo "## 🎯 Manual Deployment Completed" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📱 Build Information" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Version Type**: ${{ github.event.inputs.version_type }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Deployment Track**: ${{ github.event.inputs.deployment_track }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Version**: $(grep 'versionName' android/app/build.gradle.kts | cut -d'"' -f2)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Build Number**: $(grep 'versionCode' android/app/build.gradle.kts | grep -o '[0-9]*')" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 Artifacts Generated" >> $GITHUB_STEP_SUMMARY
+        echo "- Manual APK: \`manual-apk-${{ github.event.inputs.version_type }}-${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- Manual AAB: \`manual-aab-${{ github.event.inputs.version_type }}-${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🎯 Deployment Status" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Successfully deployed to Google Play Console (${{ github.event.inputs.deployment_track }} track)**" >> $GITHUB_STEP_SUMMARY
+
+  build-apk-artifact:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'zulu'
+        java-version: '17'
+    
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24.0'
+        channel: 'stable'
+    
+    - name: Get dependencies
+      run: flutter pub get
+    
+    - name: Build debug APK
+      run: flutter build apk --debug
+    
+    - name: Upload APK artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: debug-apk
+        path: build/app/outputs/flutter-apk/app-debug.apk
