@@ -1,0 +1,111 @@
+default_platform(:android)
+
+platform :android do
+  desc "Runs all the tests"
+  lane :test do
+    gradle(task: "test")
+  end
+
+  desc "Build debug APK"
+  lane :build_debug do
+    gradle(
+      task: "assemble",
+      build_type: "Debug"
+    )
+  end
+
+  desc "Build release APK"
+  lane :build_release do
+    gradle(
+      task: "assemble",
+      build_type: "Release"
+    )
+  end
+
+  desc "Build release AAB"
+  lane :build_aab do
+    gradle(
+      task: "bundle",
+      build_type: "Release"
+    )
+  end
+
+  desc "Build both APK and AAB for release"
+  lane :build_all_release do
+    build_release
+    build_aab
+  end
+
+  desc "Build and upload to internal testing"
+  lane :internal do
+    # Upload to Play Console (AAB should already be built)
+    upload_to_play_store(
+      track: 'internal',
+      aab: 'app/build/outputs/bundle/release/app-release.aab',
+      skip_upload_apk: true,
+      skip_upload_metadata: true,
+      skip_upload_changelogs: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true
+    )
+  end
+
+  desc "Deploy to Play Store production"
+  lane :production do
+    # Upload to Play Console (AAB should already be built)
+    upload_to_play_store(
+      track: 'production',
+      aab: 'app/build/outputs/bundle/release/app-release.aab',
+      skip_upload_apk: true,
+      skip_upload_metadata: false,
+      skip_upload_changelogs: false,
+      skip_upload_images: false,
+      skip_upload_screenshots: false
+    )
+  end
+
+  desc "Deploy to Play Store beta"
+  lane :beta do
+    # Upload to Play Console (AAB should already be built)
+    upload_to_play_store(
+      track: 'beta',
+      aab: 'app/build/outputs/bundle/release/app-release.aab',
+      skip_upload_apk: true
+    )
+  end
+
+  desc "Increment version name (major.minor.patch)"
+  lane :increment_version do |options|
+    type = options[:type] || "patch" # patch, minor, major
+    
+    current_version = get_version_name(
+      gradle_file_path: "app/build.gradle.kts"
+    )
+    
+    version_array = current_version.split('.').map(&:to_i)
+    
+    case type
+    when "major"
+      version_array[0] += 1
+      version_array[1] = 0
+      version_array[2] = 0
+    when "minor"
+      version_array[1] += 1
+      version_array[2] = 0
+    when "patch"
+      version_array[2] += 1
+    end
+    
+    new_version = version_array.join('.')
+    
+    increment_version_name(
+      gradle_file_path: "app/build.gradle.kts",
+      version_name: new_version
+    )
+    
+    # Also update pubspec.yaml
+    sh("cd .. && sed -i '' 's/version: .*/version: #{new_version}+#{get_version_code(gradle_file_path: 'app/build.gradle.kts')}/' pubspec.yaml")
+    
+    UI.success("Version updated to #{new_version}")
+  end
+end
